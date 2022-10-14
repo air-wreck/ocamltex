@@ -113,7 +113,7 @@ module Catcode = struct
 
   let to_char = function
     | `Space  -> ' '
-    | `Return -> '\n'
+    | `EOL -> '\n'
     | `Invalid -> '\x7f'
 end
 
@@ -122,7 +122,7 @@ module Token = struct
     | Char of { c : char ; code : Catcode.t }
     | ControlSequence of string
 
-  let char c = Char { c ; code = Catcode.of_char c }
+  let of_char c = Char { c ; code = Catcode.of_char c }
   let cs name = ControlSequence (List.rev name |> String.of_char_list)
   let par = ControlSequence "par"
 end
@@ -136,57 +136,55 @@ module Lexer = struct
     | LineEnded
 
   (* Strip all space characters at the right end of the input line, then
-   * insert a return at the end of the line. *)
+   * insert an EOL at the end of the line. *)
   let strip_line line =
     String.rev line
     |> String.fold ~init:['\n'] ~f:(fun acc c ->
         match acc, c with
         | ['\n'], ' ' -> acc
         | _ -> c :: acc)
-    |> String.of_char_list
 
-  (* TODO: handle case when ReadingCSName when line done *)
   (* TODO: handle superscript codes, e.g. ^^A, p. 46 *)
-  let handle_char (state, tokens) (c, next) =
-    match state, Catcode.of_char c, Catcode.of_char next with
-    | LineEnded, _, _ -> (LineEnded, tokens)
-    | ReadingCSName cs, `Letter, `Letter -> (ReadingCSName (c :: cs), tokens)
-    | ReadingCSName cs, `Letter, _ -> (MiddleLine, Token.cs (c :: cs) :: tokens)
-    | ReadingCSName _, _, _ -> (MiddleLine, Token.cs [c] :: tokens)
-    | BeginningLine, `EOL, _ -> (LineEnded, Token.par :: tokens)
-    | MiddleLine, `EOL, _ -> (LineEnded, Token.char ' ' :: tokens)
-    | SkippingBlanks, `EOL, _ -> (LineEnded, tokens)
-    | _, `Escape, _ -> (ReadingCSName [], tokens)
-    | _, `BeginGroup, _
-    | _, `EndGroup, _
-    | _, `MathShift, _
-    | _, `Align, _
-    | _, `Parameter, _
-    | _, `Superscript, _
-    | _, `Subscript, _
-    | _, `Letter, _
-    | _, `Other, _
-    | _, `Active, _ -> (MiddleLine, Token.char c :: tokens)
-    | _, `Ignored, _ -> (state, tokens)
-    | BeginningLine, `Space, _ -> (BeginningLine, tokens)
-    | SkippingBlanks, `Space, _ -> (SkippingBlanks, tokens)
-    | MiddleLine, `Space, _ -> (SkippingBlanks, Token.char ' ' :: tokens)
-    | _, `Comment, _ -> (LineEnded, tokens)
-    | _, `Invalid, _ -> print_endline "invalid character"; (state, tokens)
+  let rec handle_char (state, tokens) c =
+    match state, Catcode.of_char c with
+    | LineEnded, _ -> (LineEnded, tokens)
+    | ReadingCSName cs, `Letter -> (ReadingCSName (c :: cs), tokens)
+    | ReadingCSName cs, `EOL -> (LineEnded, Token.cs cs :: tokens)
+    | ReadingCSName [], `Space -> (SkippingBlanks, Token.cs [c] :: tokens)
+    | ReadingCSName [], _ -> (MiddleLine, Token.cs [c] :: tokens)
+    | ReadingCSName cs, _ -> handle_char (SkippingBlanks, Token.cs cs :: tokens) c
+    | BeginningLine, `EOL -> (LineEnded, Token.par :: tokens)
+    | MiddleLine, `EOL -> (LineEnded, Token.of_char ' ' :: tokens)
+    | SkippingBlanks, `EOL -> (LineEnded, tokens)
+    | _, `Escape -> (ReadingCSName [], tokens)
+    | _, `BeginGroup
+    | _, `EndGroup
+    | _, `MathShift
+    | _, `Align
+    | _, `Parameter
+    | _, `Superscript
+    | _, `Subscript
+    | _, `Letter
+    | _, `Other
+    | _, `Active -> (MiddleLine, Token.of_char c :: tokens)
+    | _, `Ignored -> (state, tokens)
+    | BeginningLine, `Space -> (BeginningLine, tokens)
+    | SkippingBlanks, `Space -> (SkippingBlanks, tokens)
+    | MiddleLine, `Space -> (SkippingBlanks, Token.of_char ' ' :: tokens)
+    | _, `Comment -> (LineEnded, tokens)
+    | _, `Invalid -> print_endline "invalid character"; (state, tokens)
+
+  let tokenize_line line =
+    let
+      (_, tokens) = List.fold line ~init:(BeginningLine, []) ~f:handle_char
+    in
+    List.rev tokens
 
   (* TODO: expandafter, noexpand, csname, string, number, romannumeral, etc. *)
   let tokenize text =
     String.split_lines text
-    |> List.map ~f:String.to_list
-    |> List.map ~f:(function
-      | [] -> failwith "Lines are always nonempty"
-      | (_ :: tail) as line ->
-          (match List.zip line (tail @ [Catcode.to_char `Invalid]) with
-           | Unequal_lengths -> failwith "Lists are same length"
-           | Ok line -> line))
-    |> List.map ~f:(List.fold ~init:(BeginningLine, []) ~f:handle_char)
-    |> List.map ~f:snd
-    |> List.concat_map ~f:List.rev
+    |> List.map ~f:strip_line
+    |> List.concat_map ~f:tokenize_line
 end
 
 (*
